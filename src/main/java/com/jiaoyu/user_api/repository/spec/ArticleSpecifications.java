@@ -1,6 +1,7 @@
 package com.jiaoyu.user_api.repository.spec;
 
 import com.jiaoyu.user_api.entity.Article;
+import com.jiaoyu.user_api.entity.ArticleStatus;
 import com.jiaoyu.user_api.entity.User;
 import jakarta.persistence.criteria.Expression;
 import jakarta.persistence.criteria.Join;
@@ -29,7 +30,36 @@ public final class ArticleSpecifications {
     }
 
     /**
-     * 标签筛选：文章的 tagList 里包含指定标签。
+     * 【安全基线】只查已发布文章。
+     *
+     * <p>这是本轮最重要的一个条件：所有公开入口（列表、搜索、标签筛选、关注流、
+     * 他人主页、标签计数）都必须以它开头。<b>刻意不返回 null</b> —— 与其它条件不同，
+     * 它没有「不筛选」的语义，只要漏掉一次就会把草稿泄露给所有人。</p>
+     *
+     * <p>把它做成一个独立 Specification 而不是在各处手写 {@code cb.equal(...)}，
+     * 是为了让「忘记加过滤」在代码审查里一眼可见：公开入口一律从 {@code publishedOnly()}
+     * 出发，只有草稿箱 {@code draftsOf()} 是例外。</p>
+     */
+    public static Specification<Article> publishedOnly() {
+        return (root, query, cb) -> cb.equal(root.get("status"), ArticleStatus.PUBLISHED);
+    }
+
+    /**
+     * 草稿箱专用：某作者自己的草稿。
+     *
+     * <p>这是全项目<b>唯一</b>允许查 DRAFT 的列表条件，方法名自带语义，
+     * 出现 DRAFT 字样的查询只应存在于此处。</p>
+     */
+    public static Specification<Article> draftsOf(Long authorId) {
+        if (authorId == null) {
+            return null;
+        }
+        return (root, query, cb) -> cb.and(
+                cb.equal(root.get("status"), ArticleStatus.DRAFT),
+                cb.equal(root.get("author").get("id"), authorId));
+    }
+
+    /** 标签筛选：文章的 tagList 里包含指定标签。
      *
      * <p>用 {@code cb.isMember} 而不是 join，保证 count 与分页行数正确。</p>
      */

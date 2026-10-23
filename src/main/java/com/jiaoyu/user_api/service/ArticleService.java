@@ -2,6 +2,7 @@ package com.jiaoyu.user_api.service;
 
 import com.jiaoyu.user_api.dto.ArticleListQuery;
 import com.jiaoyu.user_api.entity.Article;
+import com.jiaoyu.user_api.entity.ArticleStatus;
 import com.jiaoyu.user_api.entity.Comment;
 import com.jiaoyu.user_api.entity.User;
 import com.jiaoyu.user_api.exception.ApiException;
@@ -21,6 +22,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * 文章业务逻辑层。
@@ -33,10 +35,16 @@ import java.util.Set;
 public class ArticleService {
 
     /** slug 保留字：这些路径被真实接口占用，文章 slug 撞上就会永久不可访问（被端点遮蔽）。 */
-    private static final Set<String> RESERVED_SLUGS = Set.of("feed", "hot", "tags");
+    private static final Set<String> RESERVED_SLUGS = Set.of("feed", "hot", "tags", "drafts");
+
+    /** 草稿标题为空时的占位符：数据库 title 是 NOT NULL，草稿允许没写标题但列不能是 null。 */
+    public static final String UNTITLED_DRAFT = "无标题草稿";
 
     /** slug 最大长度：留足余量给唯一性后缀，同时不超过 slug 列长度。 */
     private static final int MAX_SLUG_LENGTH = 100;
+
+    /** 统一的「不存在」文案。草稿对他人、链接失效都用它，保证错误体逐字一致，不泄露差异。 */
+    private static final String NOT_FOUND_MESSAGE = "文章不存在";
 
     private final ArticleRepository articleRepository;
     private final UserRepository userRepository;
@@ -52,38 +60,84 @@ public class ArticleService {
 
     // ------------------------------------------------------------------ 写
 
-    // 创建文章
-    public Article createArticle(String username, String title, String description, String body, List<String> tagList) {
+    /**
+     * 创建文章。
+     *
+     * @param draft true 落库为草稿（标题可空、slug 用 draft- 前缀的随机值）；
+     *              false 落库为已发布（标题必填、slug 由标题派生）
+     */
+    public Article createArticle(String username, String title, String description, String body,
+                                 List<String> tagList, boolean draft) {
         User author = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ApiException("用户不存在", 404));
 
         Article article = new Article();
-        article.setTitle(title);
-        article.setDescription(description);
-        article.setBody(body);
+        // title 列是 NOT NULL，草稿允许「没写标题」但不能是 null，统一归一化成空串
+        article.setTitle(title == null ? "" : title.trim());
+        article.setDescription(description == null ? "" : description);
+        article.setBody(body == null ? "" : body);
         article.setTagList(normalizeTags(tagList));
         article.setAuthor(author);
-        article.setSlug(generateUniqueSlug(title)); // 自动生成短网址（纯中文标题会走兜底）
+
+        if (draft) {
+            article.setStatus(ArticleStatus.DRAFT);
+            article.setSlug(generateDraftSlug());
+        } else {
+            if (article.getTitle().isEmpty()) {
+                throw new ApiException("标题不能为空", 400);
+            }
+            article.setStatus(ArticleStatus.PUBLISHED);
+            article.setSlug(generateUniqueSlug(article.getTitle()));
+        }
         return articleRepository.save(article);
     }
 
-    // 更新文章（只能改自己的文章：Service 层强校验，任何入口都绕不过去）
+    /**
+     * 更新文章（只能改自己的；草稿被他人访问时按「不存在」处理）。
+     *
+     * @param draft 状态意图：{@code null} 表示「保持原状态」——注意这与 PRD 字面的
+     *              「缺省 false」不同，是刻意的：旧客户端不传 draft，若按 false 处理，
+     *              作者用旧请求体编辑自己的草稿会被**静默发布**（意外曝光）。
+     *              {@code true} 存草稿，{@code false} 发布。
+     */
     public Article updateArticle(String slug, String currentUsername,
-                                 String title, String description, String body, List<String> tagList) {
-        Article article = getArticle(slug);
-        requireAuthor(article, currentUsername);
-        if (title != null) article.setTitle(title);
+                                 String title, String description, String body,
+                                 List<String> tagList, Boolean draft) {
+        Article article = getEditableArticle(slug, currentUsername);
+        if (title != null) article.setTitle(title.trim());
         if (description != null) article.setDescription(description);
         if (body != null) article.setBody(body);
         if (tagList != null) article.setTagList(normalizeTags(tagList));
+
+        if (draft != null) {
+            if (draft) {
+                // 撤回为草稿：保留原 slug，避免已经发出去的链接失效
+                article.setStatus(ArticleStatus.DRAFT);
+            } else {
+                // 转为发布：内容必须完整（完整性校验放在「合并之后」，而不是 Bean Validation，
+                // 否则「只改正文的已发布文章」会被 title 必填规则误拦）
+                if (article.getTitle() == null || article.getTitle().isBlank()) {
+                    throw new ApiException("发布前必须填写标题", 400);
+                }
+                if (article.getBody() == null || article.getBody().isBlank()) {
+                    throw new ApiException("发布前必须填写正文", 400);
+                }
+                boolean wasDraft = article.isDraft();
+                article.setStatus(ArticleStatus.PUBLISHED);
+                // 草稿首次发布时才把 draft-xxx 换成标题派生 slug。
+                // 此时草稿不能被评论/收藏、也没有对外分享链接，重算不会破坏任何外部引用。
+                if (wasDraft) {
+                    article.setSlug(generateUniqueSlug(article.getTitle()));
+                }
+            }
+        }
         return articleRepository.save(article);
     }
 
     // 删除文章（只能删自己的；先删其评论，避免 comments 表外键约束导致 500）
     @Transactional
     public void deleteArticle(String slug, String currentUsername) {
-        Article article = getArticle(slug);
-        requireAuthor(article, currentUsername);
+        Article article = getEditableArticle(slug, currentUsername);
         commentRepository.deleteByArticleId(article.getId());
         articleRepository.delete(article);
     }
@@ -95,16 +149,18 @@ public class ArticleService {
      * incrementViewCount 带 clearAutomatically，一级缓存被清掉，第二次查询拿到的是自增后的真实值。</p>
      */
     @Transactional
-    public Article getArticleAndIncreaseViews(String slug) {
-        Article article = getArticle(slug); // 不存在直接 404
+    public Article getArticleAndIncreaseViews(String slug, String currentUsername) {
+        Article article = getVisibleArticle(slug, currentUsername); // 不存在 / 草稿且非作者 → 404
         articleRepository.incrementViewCount(article.getId());
-        return getArticle(slug); // 缓存已清，这里是一次真实查询，拿到 viewCount 已 +1 的快照
+        return getVisibleArticle(slug, currentUsername); // 缓存已清，这里是一次真实查询，拿到 viewCount 已 +1 的快照
     }
 
     // 收藏文章（事务内修改收藏集合并同步计数）
     @Transactional
     public Article favorite(String slug, String username) {
-        Article article = getArticle(slug);
+        // 草稿不可被收藏：作者若收藏了自己的草稿，?favorited=me 会被公开基线过滤掉，
+        // 变成「明明收藏了却找不到」；直接按不存在处理最省事也最不容易出错。
+        Article article = getVisibleArticle(slug, username);
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ApiException("用户不存在", 404));
         boolean already = article.getFavoritedBy().stream()
@@ -119,7 +175,7 @@ public class ArticleService {
     // 取消收藏
     @Transactional
     public Article unfavorite(String slug, String username) {
-        Article article = getArticle(slug);
+        Article article = getVisibleArticle(slug, username);
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ApiException("用户不存在", 404));
         boolean removed = article.getFavoritedBy().removeIf(u -> u.getId().equals(user.getId()));
@@ -131,10 +187,67 @@ public class ArticleService {
 
     // ------------------------------------------------------------------ 读
 
-    // 根据 slug 获取文章
-    public Article getArticle(String slug) {
+    // ------------------------------------------------------------------ 可见性判定（本轮核心）
+
+    /**
+     * 按 slug 取文章，<b>不做可见性判断</b>。
+     *
+     * <p>刻意设为 private：任何面向外部请求的入口都必须走
+     * {@link #getVisibleArticle} 或 {@link #getEditableArticle}，
+     * 否则就会出现「某个端点忘了判草稿」的泄露。</p>
+     */
+    private Article loadBySlug(String slug) {
         return articleRepository.findBySlug(slug)
-                .orElseThrow(() -> new ApiException("文章不存在", 404));
+                .orElseThrow(() -> new ApiException(NOT_FOUND_MESSAGE, 404));
+    }
+
+    /**
+     * 【读接口统一入口】取一篇对当前访问者可见的文章。
+     *
+     * <p>判定顺序是刻意的：<b>先判状态、再议归属</b>。
+     * 草稿对非作者一律返回 404（而不是 403），因为 403 等于告诉对方「这里确实有篇文章」，
+     * 草稿的存在性本身就是不该泄露的信息。已发布的文章存在性本来就是公开的，
+     * 所以「已发布 + 非作者」仍然可以正常读到 200。</p>
+     *
+     * @param currentUsername 当前登录用户名，未登录传 null
+     */
+    public Article getVisibleArticle(String slug, String currentUsername) {
+        Article article = loadBySlug(slug);
+        if (article.isDraft() && !isAuthor(article, currentUsername)) {
+            throw new ApiException(NOT_FOUND_MESSAGE, 404);
+        }
+        return article;
+    }
+
+    /**
+     * 【写接口统一入口】取一篇当前用户可以修改/删除的文章。
+     *
+     * <p>与读的区别只有一点：草稿仍然 404，已发布但非作者时返回 403
+     * （沿用上一轮「只能修改/删除自己的文章」的语义，前端已有对应分支）。</p>
+     */
+    public Article getEditableArticle(String slug, String currentUsername) {
+        Article article = loadBySlug(slug);
+        if (article.isDraft() && !isAuthor(article, currentUsername)) {
+            throw new ApiException(NOT_FOUND_MESSAGE, 404);
+        }
+        requireAuthor(article, currentUsername);
+        return article;
+    }
+
+    private boolean isAuthor(Article article, String username) {
+        return username != null
+                && article.getAuthor() != null
+                && username.equals(article.getAuthor().getUsername());
+    }
+
+    /** 草稿箱：当前用户自己的草稿，按更新时间倒序。 */
+    public Page<Article> listDrafts(String currentUsername, Pageable pageable) {
+        User current = userRepository.findByUsername(currentUsername)
+                .orElseThrow(() -> new ApiException("用户不存在", 404));
+        // 唯一的合法例外：这里允许查 DRAFT（draftsOf 方法名自带语义）
+        List<Specification<Article>> parts = new ArrayList<>();
+        parts.add(ArticleSpecifications.draftsOf(current.getId()));
+        return articleRepository.findAll(combine(parts), pageable);
     }
 
     /**
@@ -157,6 +270,8 @@ public class ArticleService {
         }
 
         List<Specification<Article>> parts = new ArrayList<>();
+        // 第 0 位永远是「仅已发布」基线：无论 tag/q/sort/author/favorited 怎么组合都拿不掉它
+        parts.add(ArticleSpecifications.publishedOnly());
         parts.add(ArticleSpecifications.hasTag(query.getTag()));
         parts.add(ArticleSpecifications.hasAuthor(query.getAuthor()));
         parts.add(ArticleSpecifications.favoritedBy(favoritedUserId));
@@ -178,15 +293,16 @@ public class ArticleService {
         }
 
         List<Specification<Article>> parts = new ArrayList<>();
+        parts.add(ArticleSpecifications.publishedOnly()); // 关注流同样不许出现草稿
         parts.add(ArticleSpecifications.authorIdIn(followIds));
         parts.add(ArticleSpecifications.hasTag(query.getTag()));
         parts.add(ArticleSpecifications.matchesText(query.getQ()));
         return articleRepository.findAll(combine(parts), query.toPageable());
     }
 
-    /** 文章评论分页列表。 */
-    public Page<Comment> getComments(String slug, Pageable pageable) {
-        Article article = getArticle(slug);
+    /** 文章评论分页列表（草稿的评论对非作者表现为不存在）。 */
+    public Page<Comment> getComments(String slug, Pageable pageable, String currentUsername) {
+        Article article = getVisibleArticle(slug, currentUsername);
         return commentRepository.findByArticle_Id(article.getId(), pageable);
     }
 
@@ -229,7 +345,7 @@ public class ArticleService {
         if (body == null || body.isBlank()) {
             throw new ApiException("评论内容不能为空", 400);
         }
-        Article article = getArticle(slug);
+        Article article = getVisibleArticle(slug, username);
         User author = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ApiException("用户不存在", 404));
         Comment comment = new Comment();
@@ -241,7 +357,7 @@ public class ArticleService {
 
     // 删除评论（只允许评论作者本人删）
     public void deleteComment(String slug, Long commentId, String username) {
-        Comment comment = requireComment(commentId, slug);
+        Comment comment = requireComment(commentId, slug, username);
         if (!username.equals(comment.getAuthor().getUsername())) {
             throw new ApiException("只能删除自己的评论", 403);
         }
@@ -251,7 +367,7 @@ public class ArticleService {
     // 点赞评论（事务内修改点赞集合并同步计数）。先校验评论确实属于该文章
     @Transactional
     public Comment likeComment(String slug, Long commentId, String username) {
-        Comment comment = requireComment(commentId, slug);
+        Comment comment = requireComment(commentId, slug, username);
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ApiException("用户不存在", 404));
         boolean already = comment.getLikedBy().stream()
@@ -266,7 +382,7 @@ public class ArticleService {
     // 取消点赞评论
     @Transactional
     public Comment unlikeComment(String slug, Long commentId, String username) {
-        Comment comment = requireComment(commentId, slug);
+        Comment comment = requireComment(commentId, slug, username);
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ApiException("用户不存在", 404));
         boolean removed = comment.getLikedBy().removeIf(u -> u.getId().equals(user.getId()));
@@ -305,11 +421,15 @@ public class ArticleService {
     }
 
     // 取出评论并校验它确实属于指定文章（与删除评论共用同一套校验逻辑）
-    private Comment requireComment(Long commentId, String slug) {
+    private Comment requireComment(Long commentId, String slug, String currentUsername) {
         Comment comment = commentRepository.findById(commentId)
                 .orElseThrow(() -> new ApiException("评论不存在", 404));
         if (comment.getArticle() == null || !slug.equals(comment.getArticle().getSlug())) {
             throw new ApiException("评论不属于该文章", 404);
+        }
+        // 草稿的评论对非作者同样表现为「不存在」：否则可以通过评论 id 探测到草稿存在
+        if (comment.getArticle().isDraft() && !isAuthor(comment.getArticle(), currentUsername)) {
+            throw new ApiException("评论不存在", 404);
         }
         return comment;
     }
@@ -357,5 +477,15 @@ public class ArticleService {
             slug = base + "-" + suffix++;
         }
         return slug;
+    }
+
+    /**
+     * 生成草稿 slug：{@code draft-} + 32 位随机十六进制。
+     *
+     * <p>草稿可能连标题都没有，压根无法从标题派生；用随机值保证唯一、且猜测不到。
+     * 首次发布会把它换成标题派生的可读 slug（见 {@link #updateArticle}）。</p>
+     */
+    private String generateDraftSlug() {
+        return "draft-" + UUID.randomUUID().toString().replace("-", "");
     }
 }

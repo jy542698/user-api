@@ -22,3 +22,15 @@ spring.jpa.show-sql=true
 # 长度至少 32 字符，否则 jjwt 会拒绝签名
 app.jwt.secret=请替换为一段足够长的随机字符串至少32字符
 app.jwt.expiration=86400000
+
+# ===== 文件上传（图片二进制存 MySQL，不落磁盘）=====
+# Spring 的单文件上限默认只有 1MB，不放宽的话 5MB 图片会被容器直接拒掉。
+# 这里设 6MB/7MB，比业务上限 5242880 留出余量，让业务层先命中、给出中文提示。
+spring.servlet.multipart.max-file-size=6MB
+spring.servlet.multipart.max-request-size=7MB
+
+# 业务上限：5MB（= 5 * 1024 * 1024）
+app.upload.image.max-bytes=5242880
+app.upload.image.max-size-label=5MB
+# 类型白名单，逗号分隔
+app.upload.image.allowed-types=image/jpeg,image/png,image/gif,image/webp

@@ -8,6 +8,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
 
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
@@ -96,6 +98,32 @@ public class GlobalExceptionHandler {
         // 与其它字段级错误保持同构：值也是数组
         errors.put(name, List.of("参数 " + name + " 的格式不正确"));
         errors.put("body", List.of("参数 " + name + " 的格式不正确"));
+        return ResponseEntity.badRequest().body(Map.of("errors", errors));
+    }
+
+    /**
+     * 上传文件超过容器上限。
+     *
+     * <p>业务层自己也校验了大小，但容器在进入 Controller **之前**就会因为
+     * {@code spring.servlet.multipart.max-file-size} 抛这个异常。不兜住的话
+     * 前端只会收到一个没有 errors 体的 500。</p>
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<Map<String, Object>> handleMaxUploadSize(MaxUploadSizeExceededException ex) {
+        String msg = "图片超过大小上限，请压缩后重试";
+        Map<String, Object> errors = new LinkedHashMap<>();
+        errors.put("file", List.of(msg));
+        errors.put("body", List.of(msg));
+        return ResponseEntity.badRequest().body(Map.of("errors", errors));
+    }
+
+    /** multipart 请求本身不合法（缺少 boundary、分段损坏等）。 */
+    @ExceptionHandler(MultipartException.class)
+    public ResponseEntity<Map<String, Object>> handleMultipart(MultipartException ex) {
+        String msg = "上传请求格式不正确，请重新选择文件";
+        Map<String, Object> errors = new LinkedHashMap<>();
+        errors.put("file", List.of(msg));
+        errors.put("body", List.of(msg));
         return ResponseEntity.badRequest().body(Map.of("errors", errors));
     }
 

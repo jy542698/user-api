@@ -33,4 +33,16 @@ public class TagController {
     public TagResponseWrapper.HotList hot(@RequestParam(value = "limit", required = false) Integer limit) {
         return new TagResponseWrapper.HotList(tagService.hotTags(limit));
     }
+
+    /**
+     * GET /tags/stats  ->  {"tags":[{"name":"vue","count":12}, ...]}
+     *
+     * <p>全量带计数的标签，供标签页展示「N 篇文章」。与 /tags/hot 的区别：
+     * hot 是 top-N 语义（默认 10 条），stats 是全量语义。二者共用同一份聚合查询。
+     * 只统计<b>已发布</b>文章 —— 仅在草稿里出现的标签不会出现在这里。</p>
+     */
+    @GetMapping("/stats")
+    public TagResponseWrapper.HotList stats() {
+        return new TagResponseWrapper.HotList(tagService.stats());
+    }
 }

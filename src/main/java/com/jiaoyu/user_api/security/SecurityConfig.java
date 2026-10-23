@@ -41,7 +41,7 @@ public class SecurityConfig {
                 // 注册、登录接口完全公开
                 .requestMatchers(HttpMethod.POST, "/users", "/users/login").permitAll()
                 // ★ 关注流必须登录：必须写在 /articles 放行规则之前，否则会被下面的规则吃掉
-                .requestMatchers(HttpMethod.GET, "/articles/feed").authenticated()
+                .requestMatchers(HttpMethod.GET, "/articles/feed", "/articles/drafts").authenticated()
                 // 浏览文章与评论列表：用精确匹配放行。
                 // 这里刻意不用 "/articles/**"——Ant 风格的多段通配会把 /articles/feed 一起放行；
                 // 单段 "*" 只匹配一层：/articles、/articles/{slug}、/articles/{slug}/comments，
@@ -49,7 +49,10 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/articles", "/articles/*", "/articles/*/comments").permitAll()
                 // 查看他人资料与标签：GET 公开
                 .requestMatchers(HttpMethod.GET, "/profiles/*").permitAll()
-                .requestMatchers(HttpMethod.GET, "/tags", "/tags/hot").permitAll()
+                .requestMatchers(HttpMethod.GET, "/tags", "/tags/hot", "/tags/stats").permitAll()
+                // 图片读取必须匿名放行，否则文章页里的 <img> 全部 401。
+                // 用单段通配 * 而不是 **，避免顺带放行 /images/a/b 这类不该存在的路径。
+                .requestMatchers(HttpMethod.GET, "/images/*").permitAll()
                 // 放行错误页：否则接口抛异常时会变成误导性的 403，看不到真实错误
                 .requestMatchers("/error").permitAll()
                 // 其余接口（发文/改/删/收藏/评论/关注等写操作）必须携带有效 Token

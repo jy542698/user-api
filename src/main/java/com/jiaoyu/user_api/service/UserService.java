@@ -1,6 +1,7 @@
 package com.jiaoyu.user_api.service;
 
 import com.jiaoyu.user_api.dto.ProfileResponseWrapper;
+import com.jiaoyu.user_api.entity.ArticleStatus;
 import com.jiaoyu.user_api.entity.User;
 import com.jiaoyu.user_api.exception.ApiException;
 import com.jiaoyu.user_api.repository.ArticleRepository;
@@ -140,7 +141,9 @@ public class UserService {
         view.bio = target.getBio();
         view.image = target.getImage();
         view.following = following;
-        view.articlesCount = articleRepository.countByAuthor_Id(target.getId());
+        // 只数已发布文章：草稿也算进去的话，他人主页会出现
+        // 「显示 12 篇文章，但下面只列出 9 篇」的矛盾（草稿对他不可见）。
+        view.articlesCount = articleRepository.countByAuthor_IdAndStatus(target.getId(), ArticleStatus.PUBLISHED);
         view.followersCount = userRepository.countByFollowing_Id(target.getId());
         view.followingCount = userRepository.countFollowingOf(target.getId());
         return view;

@@ -11,6 +11,7 @@ import com.jiaoyu.user_api.entity.Comment;
 import com.jiaoyu.user_api.entity.User;
 import com.jiaoyu.user_api.repository.UserRepository;
 import com.jiaoyu.user_api.service.ArticleService;
+import jakarta.validation.Valid;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -48,6 +49,11 @@ public class ArticleController {
         return userRepository.findByUsername(principal.getUsername()).map(User::getId).orElse(null);
     }
 
+    // 当前登录用户名（未登录返回 null）：草稿可见性判定用它，不必再查一次库
+    private String currentUsername(UserDetails principal) {
+        return principal == null ? null : principal.getUsername();
+    }
+
     /**
      * 把实体转成返回视图（列表页专用：零查询）。
      *
@@ -65,6 +71,7 @@ public class ArticleController {
         view.updatedAt = a.getUpdatedAt();
         view.favoritesCount = a.getFavoritesCount();
         view.viewCount = a.getViewCount();
+        view.status = a.getStatus() == null ? null : a.getStatus().name();
         view.favorited = favoritedIds.contains(a.getId());
 
         ArticleResponseWrapper.AuthorView author = new ArticleResponseWrapper.AuthorView();
@@ -89,6 +96,7 @@ public class ArticleController {
         view.updatedAt = a.getUpdatedAt();
         view.favoritesCount = a.getFavoritesCount();
         view.viewCount = a.getViewCount();
+        view.status = a.getStatus() == null ? null : a.getStatus().name();
         view.favorited = articleService.isFavorited(a.getId(), currentUserId);
 
         ArticleResponseWrapper.AuthorView author = new ArticleResponseWrapper.AuthorView();
@@ -122,12 +130,20 @@ public class ArticleController {
         return new ArticleResponseWrapper.ListResult(views, page.getTotalElements());
     }
 
-    // POST /articles  ->  创建文章（需要登录）
+    /**
+     * POST /articles  ->  创建文章（需要登录）。
+     *
+     * <p>{@code article.draft=true} 时存为草稿：标题/正文都允许为空，slug 用 draft- 随机值。
+     * 这里用 {@code @Valid}（默认组）只做长度校验；「发布时内容必须完整」由 Service 判定 ——
+     * 只有它能同时看到 draft 意图与合并后的内容。</p>
+     */
     @PostMapping
     public ArticleResponseWrapper.Single create(@AuthenticationPrincipal UserDetails principal,
-                                                @Validated(ValidationGroups.Create.class) @RequestBody ArticleRequest req) {
+                                                @Valid @RequestBody ArticleRequest req) {
         ArticleRequest.ArticlePayload p = req.article;
-        Article a = articleService.createArticle(principal.getUsername(), p.title, p.description, p.body, p.tagList);
+        boolean draft = Boolean.TRUE.equals(p.draft);
+        Article a = articleService.createArticle(principal.getUsername(),
+                p.title, p.description, p.body, p.tagList, draft);
         return new ArticleResponseWrapper.Single(toSingleView(a, currentUserId(principal)));
     }
 
@@ -166,11 +182,27 @@ public class ArticleController {
         return toListResult(articleService.listFeed(query, principal.getUsername()), uid);
     }
 
+    /**
+     * GET /articles/drafts  ->  我的草稿箱（必须登录）。
+     *
+     * <p>全项目<b>唯一</b>返回 DRAFT 的列表端点，且只返回当前用户自己的草稿。
+     * 注意它在 SecurityConfig 里的放行规则必须写在 {@code /articles/*} 的 permitAll 之前，
+     * 否则会被单段通配吃掉、变成匿名可访问。</p>
+     */
+    @GetMapping("/drafts")
+    public ArticleResponseWrapper.ListResult drafts(@AuthenticationPrincipal UserDetails principal,
+                                                    @RequestParam(value = "limit", required = false) Integer limit,
+                                                    @RequestParam(value = "offset", required = false) Integer offset) {
+        ArticleListQuery query = ArticleListQuery.ofPaging(null, limit, offset);
+        Long uid = currentUserId(principal);
+        return toListResult(articleService.listDrafts(principal.getUsername(), query.toPageable()), uid);
+    }
+
     // GET /articles/{slug}  ->  单篇文章（无需登录），返回时 viewCount 已 +1
     @GetMapping("/{slug}")
     public ArticleResponseWrapper.Single get(@AuthenticationPrincipal UserDetails principal,
                                             @PathVariable String slug) {
-        Article article = articleService.getArticleAndIncreaseViews(slug);
+        Article article = articleService.getArticleAndIncreaseViews(slug, currentUsername(principal));
         return new ArticleResponseWrapper.Single(toSingleView(article, currentUserId(principal)));
     }
 
@@ -178,10 +210,10 @@ public class ArticleController {
     @PutMapping("/{slug}")
     public ArticleResponseWrapper.Single update(@AuthenticationPrincipal UserDetails principal,
                                                 @PathVariable String slug,
-                                                @Validated(ValidationGroups.Update.class) @RequestBody ArticleRequest req) {
+                                                @Valid @RequestBody ArticleRequest req) {
         ArticleRequest.ArticlePayload p = req.article;
         Article a = articleService.updateArticle(slug, principal.getUsername(),
-                p.title, p.description, p.body, p.tagList);
+                p.title, p.description, p.body, p.tagList, p.draft);
         return new ArticleResponseWrapper.Single(toSingleView(a, currentUserId(principal)));
     }
 
@@ -217,7 +249,7 @@ public class ArticleController {
         Pageable pageable = paging.toPageable();
         Long uid = currentUserId(principal);
 
-        Page<Comment> page = articleService.getComments(slug, pageable);
+        Page<Comment> page = articleService.getComments(slug, pageable, currentUsername(principal));
         List<CommentResponseWrapper.CommentView> views = page.getContent().stream()
                 .map(c -> toCommentView(c, uid))
                 .toList();

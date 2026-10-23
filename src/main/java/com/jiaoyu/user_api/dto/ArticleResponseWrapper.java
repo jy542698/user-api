@@ -19,6 +19,8 @@ public class ArticleResponseWrapper {
         public int favoritesCount;
         // 新增字段（只增不改）：详情页展示「N 次阅读」。旧前端会直接忽略它。
         public long viewCount;
+        // 新增字段（只增不改）：DRAFT / PUBLISHED。前端据此渲染「草稿」胶囊与提示条。
+        public String status;
         public AuthorView author;
     }
 

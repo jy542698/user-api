@@ -1,6 +1,7 @@
 package com.jiaoyu.user_api.repository;
 
 import com.jiaoyu.user_api.entity.Article;
+import com.jiaoyu.user_api.entity.ArticleStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
@@ -28,14 +29,15 @@ public interface ArticleRepository extends JpaRepository<Article, Long>, JpaSpec
     // 判断某用户是否收藏了某文章（详情页单篇用；列表页必须走下面的批量查询）
     boolean existsByFavoritedBy_IdAndId(Long userId, Long articleId);
 
-    // 按作者用户名查文章（保留给极少数需要全量的场景；列表页一律走 Specification 分页）
-    List<Article> findByAuthor_Username(String username);
+    // 注意：原来的 findByAuthor_Username / findByFavoritedBy_Username 已删除。
+    // 它们是死方法（零引用），留着就是未来的漏网点 —— 任何人顺手调用一次就会绕过
+    // 草稿过滤把 DRAFT 文章捞出来。列表查询一律走 ArticleService.publicQuery()。
 
-    // 按收藏者用户名查文章（同上）
-    List<Article> findByFavoritedBy_Username(String username);
-
-    // 某作者的文章总数（首页/个人主页统计用，不拉数据只 count）
+    // 某作者的文章总数（不拉数据只 count）
     long countByAuthor_Id(Long authorId);
+
+    // 某作者已发布文章数：个人主页统计必须用它，否则会出现「显示 12 篇文章但列表只有 9 篇」
+    long countByAuthor_IdAndStatus(Long authorId, ArticleStatus status);
 
     /**
      * 批量判定「这一页里哪些文章被当前用户收藏了」。
@@ -59,8 +61,12 @@ public interface ArticleRepository extends JpaRepository<Article, Long>, JpaSpec
      * 标签聚合：每个标签被多少篇**不同**文章使用，按文章数降序、同数按字典序。
      *
      * <p>替代原来「findAll() 把整张 articles 表（含 body TEXT）拉进 JVM 再去重」的写法。</p>
+     *
+     * <p>必须带 {@code status} 条件：只被草稿使用的标签不能出现在标签页与热门标签里，
+     * 否则等于把草稿的痕迹泄露出去。</p>
      */
     @Query("select t, count(distinct a.id) from Article a join a.tagList t "
+            + "where a.status = :status "
             + "group by t order by count(distinct a.id) desc, t asc")
-    List<Object[]> findTagStats();
+    List<Object[]> findTagStats(@Param("status") ArticleStatus status);
 }

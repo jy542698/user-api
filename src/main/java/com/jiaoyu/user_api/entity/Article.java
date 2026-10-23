@@ -49,6 +49,20 @@ public class Article {
     @Column(nullable = false, columnDefinition = "bigint not null default 0")
     private long viewCount = 0;
 
+    /**
+     * 文章状态：草稿 or 已发布。
+     *
+     * <p><b>columnDefinition 里必须带默认值</b>：给已存在的表加列时，Hibernate 的
+     * {@code ddl-auto=update} 会执行 {@code ALTER TABLE ... ADD COLUMN status varchar(16) not null}。
+     * 如果这里不写 {@code default 'PUBLISHED'}，ALTER 本身会成功、但**存量行会被填成空串**，
+     * 于是所有历史文章在新加的 {@code status='PUBLISHED'} 过滤条件下全部消失。
+     * 加上默认值后，存量行自动为 PUBLISHED，无需手工回填也不会丢数据。</p>
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 16,
+            columnDefinition = "varchar(16) not null default 'PUBLISHED'")
+    private ArticleStatus status = ArticleStatus.PUBLISHED;
+
     // 收藏关系：哪些用户收藏了这篇文章（懒加载，只在收藏/取消的事务里用）
     @ManyToMany(fetch = FetchType.LAZY)
     @JoinTable(name = "article_favorites",
@@ -136,6 +150,19 @@ public class Article {
 
     public void setViewCount(long viewCount) {
         this.viewCount = viewCount;
+    }
+
+    public ArticleStatus getStatus() {
+        return status;
+    }
+
+    public void setStatus(ArticleStatus status) {
+        this.status = status;
+    }
+
+    /** 便捷判断：是否是草稿。列表过滤与可见性判定都用它，避免到处写 == DRAFT。 */
+    public boolean isDraft() {
+        return status == ArticleStatus.DRAFT;
     }
 
     public Set<User> getFavoritedBy() {

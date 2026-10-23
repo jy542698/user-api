@@ -1,6 +1,7 @@
 package com.jiaoyu.user_api.service;
 
 import com.jiaoyu.user_api.dto.TagResponseWrapper;
+import com.jiaoyu.user_api.entity.ArticleStatus;
 import com.jiaoyu.user_api.repository.ArticleRepository;
 import org.springframework.stereotype.Service;
 
@@ -54,9 +55,19 @@ public class TagService {
         return allTagStats().stream().map(tag -> tag.name).toList();
     }
 
-    // 一次聚合查询，把所有标签及其文章数取出来
+    /**
+     * 全部标签及文章数（独立标签页用），count 降序、同数按字典序。
+     *
+     * <p>与 {@link #hotTags(Integer)} 共用同一条聚合查询，区别只是不截断。</p>
+     */
+    public List<TagResponseWrapper.HotTag> stats() {
+        return allTagStats();
+    }
+
+    // 一次聚合查询，把所有标签及其文章数取出来。
+    // 只统计已发布文章：仅被草稿使用的标签不能出现在标签页 / 热门标签里。
     private List<TagResponseWrapper.HotTag> allTagStats() {
-        List<Object[]> rows = articleRepository.findTagStats();
+        List<Object[]> rows = articleRepository.findTagStats(ArticleStatus.PUBLISHED);
         List<TagResponseWrapper.HotTag> stats = new ArrayList<>(rows.size());
         for (Object[] row : rows) {
             if (row == null || row.length < 2) {
